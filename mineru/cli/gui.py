@@ -1,6 +1,7 @@
 # Copyright (c) Opendatalab. All rights reserved.
 
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -47,6 +48,8 @@ def validate_input(path: str) -> str | None:
 
 
 _BaseWindow = QMainWindow if HAS_PYQT6 else object
+
+MAX_LOG_LINES = 500
 
 
 class MinerUGui(_BaseWindow):
@@ -131,6 +134,12 @@ class MinerUGui(_BaseWindow):
         log_layout.addWidget(self.log_text)
         layout.addWidget(log_group, stretch=1)
 
+    def _notify(self, title: str, body: str):
+        try:
+            subprocess.Popen(["notify-send", title, body])
+        except FileNotFoundError:
+            pass
+
     def _browse_input(self):
         if self.radio_folder.isChecked():
             path = QFileDialog.getExistingDirectory(self, "Select Input Folder")
@@ -192,12 +201,24 @@ class MinerUGui(_BaseWindow):
         if self.process and self.process.state() != QProcess.ProcessState.NotRunning:
             self.process.kill()
             self.log_text.append("\n[Process cancelled by user]")
+            self._notify("MinerU", "任务已取消")
 
     def _on_output(self):
         if self.process:
             data = self.process.readAllStandardOutput().data().decode("utf-8", errors="replace")
             if data:
                 self.log_text.append(data.rstrip())
+                # Trim excess lines to prevent lag
+                doc = self.log_text.document()
+                if doc.blockCount() > MAX_LOG_LINES:
+                    cursor = self.log_text.textCursor()
+                    cursor.movePosition(cursor.MoveOperation.Start)
+                    cursor.movePosition(
+                        cursor.MoveOperation.Down,
+                        cursor.MoveMode.KeepAnchor,
+                        doc.blockCount() - MAX_LOG_LINES,
+                    )
+                    cursor.removeSelectedText()
                 # Auto-scroll to bottom
                 sb = self.log_text.verticalScrollBar()
                 sb.setValue(sb.maximum())
@@ -207,12 +228,17 @@ class MinerUGui(_BaseWindow):
         self.run_btn.setEnabled(True)
         self.cancel_btn.setEnabled(False)
         self.process = None
+        if exit_code == 0:
+            self._notify("MinerU", "任务完成")
+        else:
+            self._notify("MinerU", f"任务失败 (退出码: {exit_code})")
 
     def _on_error(self, error):
         self.log_text.append(f"\n[Process error: {error.name}]")
         self.run_btn.setEnabled(True)
         self.cancel_btn.setEnabled(False)
         self.process = None
+        self._notify("MinerU", f"进程错误: {error.name}")
 
     def closeEvent(self, event):
         if self.process and self.process.state() != QProcess.ProcessState.NotRunning:
