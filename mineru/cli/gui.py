@@ -182,7 +182,11 @@ class MinerUGui(_BaseWindow):
 
         # Clear log and start process
         self.log_text.clear()
-        self.log_text.append(f"$ {' '.join(cmd)}\n")
+        # Quote paths with spaces for readability in log
+        def quote(s):
+            return f"'{s}'" if ' ' in s else s
+        display_cmd = ' '.join(quote(a) for a in cmd)
+        self.log_text.append(f"$ {display_cmd}\n")
 
         self.process = QProcess(self)
         self.process.setWorkingDirectory(str(Path(__file__).resolve().parent.parent.parent))
