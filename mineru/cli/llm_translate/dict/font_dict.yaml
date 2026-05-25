@@ -1,0 +1,7 @@
+# Font configuration for PDF generation
+STSONG:
+  - STSONG.TTF
+  - simsun.ttc
+STKAITI:
+  - STKAITI.TTF
+  - simkai.ttc

@@ -1,0 +1,6 @@
+# Dictionary for argument to config path mapping
+force_ocr: doc_convertor.force_ocr
+table_enable: doc_convertor.table_enable
+formula_enable: doc_convertor.formula_enable
+correct_header_type: doc_convertor.correct_header_type
+override_history: doc_convertor.override_history

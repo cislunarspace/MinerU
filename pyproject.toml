@@ -109,6 +109,13 @@ gradio = [
 gui = [
     "PyQt6>=6.6.0",
 ]
+translate = [
+    "langchain-core>=0.3.0",
+    "langchain-openai>=0.2.0",
+    "tiktoken>=0.7.0",
+    "pypandoc>=1.0.0",
+    "openai>=1.70.0,<3",
+]
 core = [
     "mineru[vlm]",
     "mineru[pipeline]",

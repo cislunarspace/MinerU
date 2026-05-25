@@ -1,0 +1,62 @@
+# MinerU LLM Configuration
+# This file contains LLM and translation settings
+
+llm_agent:
+  base_url: https://api.deepseek.com/
+  model_name: deepseek-chat
+  api_key: ""  # Please fill in your API key
+  timeout: 120
+  max_retries: 2
+  use_cache: true
+  cache_file_name: default
+  rate_control: null
+  streaming: false
+
+llm_translator:
+  need_format_code: true
+  need_correct_imagepath: true
+  timeout: 120
+  max_workers: 4
+  llm_agent_name: llm_agent
+  title_add_size: 200
+  chunk_size: 2048
+
+header_corrector:
+  allow_distance: 3
+  allow_diff_chars:
+    - "$"
+    - " "
+    - " "
+  title_chunk_size: 1024
+  allow_miss_num: 8
+  allow_miss_depth: 4
+  llm_agent_name: llm_agent
+
+code_format:
+  languages:
+    - cpp
+    - python
+  format_all_code: true
+  remove_code_in_line: true
+  code_in_line_length: 60
+  line_length: 80
+  split_before_chars:
+    - "."
+    - "-"
+    - "+"
+    - "/"
+    - "*"
+  split_after_chars:
+    - " "
+    - ","
+    - "("
+    - ")"
+    - ";"
+    - ":"
+  force_split: true
+  indentation: 4
+
+doc_convertor:
+  correct_header_type: bookmark
+  font: STSONG
+  sure_has_font: false
