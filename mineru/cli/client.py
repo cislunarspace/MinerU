@@ -497,7 +497,10 @@ def collect_input_documents(
 ) -> list[InputDocument]:
     documents: list[Path]
     if input_path.is_dir():
-        documents = [path for path in sorted(input_path.glob("*")) if path.is_file()]
+        documents = [
+            path for path in sorted(input_path.glob("**/*"))
+            if path.is_file() and path.suffix.lower() == ".pdf"
+        ]
     else:
         documents = [input_path]
 
