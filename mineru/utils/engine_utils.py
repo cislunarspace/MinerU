@@ -47,6 +47,9 @@ def _select_windows_engine() -> str:
 def _select_linux_engine(is_async: bool) -> str:
     """Linux 平台引擎选择"""
     try:
+        import torch
+        if not torch.cuda.is_available():
+            return 'transformers'
         import vllm
         return 'vllm-async' if is_async else 'vllm'
     except ImportError:
