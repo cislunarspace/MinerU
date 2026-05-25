@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 try:
-    from PyQt6.QtCore import QProcess, Qt
+    from PyQt6.QtCore import QProcess, Qt, QThread, QObject, pyqtSignal
     from PyQt6.QtWidgets import (
         QApplication,
         QComboBox,
@@ -111,6 +111,72 @@ def save_llm_config(config_dict):
     conf_path = Path(__file__).parent.parent.parent / "conf.yaml"
     with open(conf_path, 'w', encoding='utf-8') as f:
         yaml.safe_dump(config_dict, f, allow_unicode=True, sort_keys=False)
+
+
+class WorkflowWorker(QObject):
+    """Worker object for running workflows in background."""
+
+    log_signal = pyqtSignal(str)
+    finished_signal = pyqtSignal(bool, str)  # success, message
+
+    def __init__(self, gui_parent=None):
+        super().__init__()
+        self._is_running = True
+        self._workflow_done = False
+        self.parent = gui_parent  # Reference to the GUI window
+
+    def log(self, message):
+        """Log a message from the worker (thread-safe)."""
+        self.log_signal.emit(message)
+
+    def stop(self):
+        """Request the worker to stop."""
+        self._is_running = False
+
+    def is_running(self):
+        """Check if the worker should continue running."""
+        return self._is_running and not self._workflow_done
+
+    def isFinished(self):
+        """Check if workflow is done."""
+        return self._workflow_done
+
+    def do_work(self, workflow_func=None):
+        """Execute the workflow function."""
+        try:
+            self._is_running = True
+            if workflow_func is None:
+                workflow_func = self.workflow_func
+            workflow_func(self)
+        except Exception as e:
+            self.log_signal.emit(f"错误: {e}")
+            self.finished_signal.emit(False, str(e))
+        finally:
+            self._workflow_done = True
+
+    def run_process(self, cmd, cwd):
+        """Run a process and stream output line by line."""
+        env = os.environ.copy()
+        env["PYTHONUNBUFFERED"] = "1"
+        self.parent.mineru_process = subprocess.Popen(
+            cmd,
+            cwd=cwd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            env=env,
+        )
+
+        assert self.parent.mineru_process.stdout is not None
+        for line in iter(self.parent.mineru_process.stdout.readline, ""):
+            if not self._is_running:
+                break
+            self.log(line.rstrip())
+
+        returncode = self.parent.mineru_process.wait()
+        self.parent.mineru_process = None
+        return returncode
 
 
 class MinerUGui(QMainWindow if HAS_PYQT6 else object):
@@ -388,320 +454,321 @@ class MinerUGui(QMainWindow if HAS_PYQT6 else object):
         # Create output directory if needed
         os.makedirs(output_dir, exist_ok=True)
 
-        if self.radio_wf1.isChecked():
-            self._run_workflow1(input_path, output_dir)
-        elif self.radio_wf2.isChecked():
-            self._run_workflow2(input_path, output_dir)
-        else:
-            self._run_workflow3(input_path, output_dir)
-
-    def _run_workflow1(self, input_path, output_dir):
-        """Workflow 1: PDF → MinerU → Translate → PDF."""
-        backend = "CPU" if self.radio_cpu.isChecked() else "GPU"
-        start_page = self.start_page_spin.value()
-        end_page = self.end_page_spin.value() or None
-        header_type = self.header_type_combo.currentText()
-        generate_pdf = self.generate_pdf_check.isChecked()
-
-        working_dir = str(Path(__file__).parent.parent.parent)
-
         # Disable buttons to prevent concurrent execution
         self.run_btn.setEnabled(False)
         self.cancel_btn.setEnabled(True)
 
-        # Step 1: MinerU conversion
-        self.log_text.append("=" * 50)
-        self.log_text.append("步骤 1: MinerU 转换 PDF → Markdown")
-        self.log_text.append("=" * 50)
-
-        mineru_output = os.path.join(output_dir, "mineru_output")
-        os.makedirs(mineru_output, exist_ok=True)
-
-        cmd = ["uv", "run", "mineru"]
-        cmd.extend(["-p", input_path])
-        cmd.extend(["-o", mineru_output])
-        if backend == "CPU":
-            cmd.extend(["-b", "pipeline"])
-
-        self._display_and_start(cmd, working_dir, wait_for_finish=True)
-
-        if self.process and self.process.state() != QProcess.ProcessState.NotRunning:
-            self.process.waitForFinished(-1)
-
-        # Find the generated markdown
-        md_file = None
-        for f in Path(mineru_output).rglob("*.md"):
-            if "_content" not in f.name:  # Skip content list files
-                md_file = f
-                break
-
-        if not md_file:
-            self.log_text.append("错误: 未找到生成的 Markdown 文件")
-            self._enable_buttons()
-            return
-
-        self.log_text.append(f"找到 Markdown: {md_file}")
-
-        # Step 2: Translate
-        self.log_text.append("")
-        self.log_text.append("=" * 50)
-        self.log_text.append("步骤 2: 翻译 Markdown")
-        self.log_text.append("=" * 50)
-
-        # Translate using llm_translate
-        try:
-            from mineru.cli.llm_translate import Translator
-            translator = Translator()
-            translated_md = translator.translate(str(md_file))
-            self.log_text.append(f"翻译完成: {translated_md}")
-        except Exception as e:
-            self.log_text.append(f"翻译错误: {e}")
-            self._enable_buttons()
-            return
-
-        # Step 3: Header correction (if needed)
-        if header_type != "no":
-            self.log_text.append("")
-            self.log_text.append("=" * 50)
-            self.log_text.append("步骤 3: 标题校正")
-            self.log_text.append("=" * 50)
-
-            try:
-                from mineru.cli.llm_translate import get_corrector
-                corrector = get_corrector(header_type)
-                if corrector:
-                    # Need PDF for bookmark correction
-                    pdf_path = input_path if header_type == "bookmark" else None
-                    if header_type == "bookmark":
-                        self.log_text.append(f"使用书签校正，关联 PDF: {pdf_path}")
-                    # Apply correction
-                    corrected_md = str(translated_md).replace("_trans", "_correct")
-                    success = corrector.do_correct(translated_md, corrected_md)
-                    if success:
-                        self.log_text.append(f"校正完成: {corrected_md}")
-                        translated_md = corrected_md
-                    else:
-                        self.log_text.append("校正失败，使用原始翻译文件")
-            except Exception as e:
-                self.log_text.append(f"标题校正错误: {e}")
-
-        # Step 4: Generate PDF (if requested)
-        if generate_pdf:
-            self.log_text.append("")
-            self.log_text.append("=" * 50)
-            self.log_text.append("步骤 4: 生成 PDF")
-            self.log_text.append("=" * 50)
-
-            try:
-                import platform
-                import shutil
-                import subprocess
-
-                md_path = Path(translated_md)
-                # Copy to output dir
-                dest_md = Path(output_dir) / md_path.name
-                shutil.copy(md_path, dest_md)
-
-                # Use pandoc to generate PDF
-                if platform.system() == "Linux":
-                    cmd = ["pandoc", str(dest_md), "-o", str(dest_md.with_suffix(".pdf")),
-                           "--pdf-engine=prince", "-V", "mainfont=STSong", "-V", "CJKmainfont=STSong"]
-                else:
-                    cmd = ["pandoc", str(dest_md), "-o", str(dest_md.with_suffix(".pdf")),
-                           "--pdf-engine=prince"]
-
-                result = subprocess.run(cmd, capture_output=True, text=True)
-                if result.returncode == 0:
-                    self.log_text.append(f"PDF 生成完成: {dest_md.with_suffix('.pdf')}")
-                else:
-                    self.log_text.append(f"PDF 生成失败: {result.stderr}")
-            except Exception as e:
-                self.log_text.append(f"PDF 生成错误: {e}")
-
-        self.log_text.append("")
-        self.log_text.append("=" * 50)
-        self.log_text.append("工作流 1 完成!")
-        self.log_text.append("=" * 50)
-        self._enable_buttons()
-        self._notify("MinerU", "工作流 1 完成")
-
-    def _run_workflow2(self, input_path, output_dir):
-        """Workflow 2: Markdown → Translate → (PDF)."""
-        header_type = self.header_type_combo.currentText()
-        generate_pdf = self.generate_pdf_check.isChecked()
-
-        # Disable buttons to prevent concurrent execution
-        self.run_btn.setEnabled(False)
-        self.cancel_btn.setEnabled(True)
-
-        # Find associated PDF
-        pdf_path = self._find_pdf_for_markdown(input_path)
-        if pdf_path:
-            self.log_text.append(f"找到关联 PDF: {pdf_path}")
-        else:
-            self.log_text.append("未找到关联 PDF，标题校正将使用 LLM 方式")
-            if header_type == "bookmark":
-                header_type = "by_llm"
-                self.log_text.append(f"标题校正方式已改为: {header_type}")
-
-        # Translate
-        self.log_text.append("")
-        self.log_text.append("=" * 50)
-        self.log_text.append("步骤 1: 翻译 Markdown")
-        self.log_text.append("=" * 50)
-
-        try:
-            from mineru.cli.llm_translate import Translator
-            translator = Translator()
-            translated_md = translator.translate(input_path)
-            self.log_text.append(f"翻译完成: {translated_md}")
-        except Exception as e:
-            self.log_text.append(f"翻译错误: {e}")
-            self._enable_buttons()
-            return
-
-        # Header correction
-        if header_type != "no":
-            self.log_text.append("")
-            self.log_text.append("=" * 50)
-            self.log_text.append("步骤 2: 标题校正")
-            self.log_text.append("=" * 50)
-
-            try:
-                from mineru.cli.llm_translate import get_corrector
-                corrector = get_corrector(header_type)
-                if corrector:
-                    corrected_md = str(translated_md).replace("_trans", "_correct")
-                    success = corrector.do_correct(translated_md, corrected_md)
-                    if success:
-                        self.log_text.append(f"校正完成: {corrected_md}")
-                        translated_md = corrected_md
-                    else:
-                        self.log_text.append("校正失败，使用原始翻译文件")
-            except Exception as e:
-                self.log_text.append(f"标题校正错误: {e}")
-
-        # Generate PDF if requested
-        if generate_pdf:
-            self.log_text.append("")
-            self.log_text.append("=" * 50)
-            self.log_text.append("步骤 3: 生成 PDF")
-            self.log_text.append("=" * 50)
-
-            try:
-                import platform
-                import shutil
-                import subprocess
-
-                md_path = Path(translated_md)
-                dest_md = Path(output_dir) / md_path.name
-                shutil.copy(md_path, dest_md)
-
-                if platform.system() == "Linux":
-                    cmd = ["pandoc", str(dest_md), "-o", str(dest_md.with_suffix(".pdf")),
-                           "--pdf-engine=prince", "-V", "mainfont=STSong", "-V", "CJKmainfont=STSong"]
-                else:
-                    cmd = ["pandoc", str(dest_md), "-o", str(dest_md.with_suffix(".pdf")),
-                           "--pdf-engine=prince"]
-
-                result = subprocess.run(cmd, capture_output=True, text=True)
-                if result.returncode == 0:
-                    self.log_text.append(f"PDF 生成完成: {dest_md.with_suffix('.pdf')}")
-                else:
-                    self.log_text.append(f"PDF 生成失败: {result.stderr}")
-            except Exception as e:
-                self.log_text.append(f"PDF 生成错误: {e}")
-
-        self.log_text.append("")
-        self.log_text.append("=" * 50)
-        self.log_text.append("工作流 2 完成!")
-        self.log_text.append("=" * 50)
-        self._enable_buttons()
-        self._notify("MinerU", "工作流 2 完成")
-
-    def _run_workflow3(self, input_path, output_dir):
-        """Workflow 3: PDF → MinerU → Markdown."""
-        backend = "CPU" if self.radio_cpu.isChecked() else "GPU"
-        cmd = ["uv", "run", "mineru"]
-        cmd.extend(["-p", input_path])
-        cmd.extend(["-o", output_dir])
-        if backend == "CPU":
-            cmd.extend(["-b", "pipeline"])
-
-        working_dir = str(Path(__file__).parent.parent.parent)
-        self._display_and_start(cmd, working_dir)
-
-    def _display_and_start(self, cmd, working_dir, wait_for_finish=False):
-        """Display command in log and start the process."""
+        # Clear log
         self.log_text.clear()
 
-        def quote(s):
-            return f"'{s}'" if ' ' in s else s
-        display_cmd = ' '.join(quote(a) for a in cmd)
-        self.log_text.append(f"$ {display_cmd}\n")
+        # Initialize process tracking
+        self.mineru_process = None
 
-        self.process = QProcess(self)
-        self.process.setWorkingDirectory(working_dir)
-        self.process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
-        self.process.readyReadStandardOutput.connect(self._on_output)
-        self.process.readyReadStandardError.connect(self._on_output)
-        self.process.finished.connect(self._on_finished)
-        self.process.errorOccurred.connect(self._on_error)
+        # Create worker and thread (worker must have no parent to be movable)
+        self.worker = WorkflowWorker(self)  # Pass GUI as parent reference
+        self.worker_thread = QThread(self)
+        self.worker.moveToThread(self.worker_thread)
 
-        self.process.start(cmd[0], cmd[1:])
+        # Build workflow function before moving worker to thread
+        workflow_func = self._build_workflow(input_path, output_dir)
+        self.worker.workflow_func = workflow_func
 
-        if wait_for_finish:
-            self.process.waitForFinished(-1)
+        # Connect signals
+        self.worker.log_signal.connect(self._append_log)
+        self.worker.finished_signal.connect(self._on_workflow_finished)
+
+        # Connect started signal to worker method so it runs in worker thread
+        self.worker_thread.started.connect(self.worker.do_work)
+
+        # Start thread
+        self.worker_thread.start()
+
+    def _build_workflow(self, input_path, output_dir):
+        """Build selected workflow function without executing it."""
+        if self.radio_wf1.isChecked():
+            return self._create_workflow1(input_path, output_dir)
+        elif self.radio_wf2.isChecked():
+            return self._create_workflow2(input_path, output_dir)
+        else:
+            return self._create_workflow3(input_path, output_dir)
+
+    def _append_log(self, message):
+        """Append message to log text area (called from worker thread)."""
+        self.log_text.append(message)
+
+    def _on_workflow_finished(self, success, message):
+        """Handle workflow finished (called from worker thread)."""
+        # Stop the worker thread
+        if hasattr(self, 'worker_thread') and self.worker_thread.isRunning():
+            self.worker_thread.quit()
+            self.worker_thread.wait(1000)
+        self._enable_buttons()
+        if success:
+            self._notify("MinerU", message)
+        else:
+            self._notify("MinerU", f"任务失败: {message}")
+
+    def _create_workflow1(self, input_path, output_dir):
+        """Create Workflow 1: PDF → MinerU → Translate → PDF."""
+        backend = "CPU" if self.radio_cpu.isChecked() else "GPU"
+        header_type = self.header_type_combo.currentText()
+        generate_pdf = self.generate_pdf_check.isChecked()
+        working_dir = str(Path(__file__).parent.parent.parent)
+
+        def workflow(worker):
+            worker.log("=" * 50)
+            worker.log("步骤 1: MinerU 转换 PDF → Markdown")
+            worker.log("=" * 50)
+
+            mineru_output = os.path.join(output_dir, "mineru_output")
+            os.makedirs(mineru_output, exist_ok=True)
+
+            cmd = ["uv", "run", "mineru", "-p", input_path, "-o", mineru_output]
+            if backend == "CPU":
+                cmd.extend(["-b", "pipeline"])
+
+            # Run mineru with process tracking for killability
+            worker.log(f"$ {' '.join(cmd)}")
+            returncode = worker.run_process(cmd, working_dir)
+
+            if returncode != 0:
+                worker.log(f"MinerU 转换失败，退出码: {returncode}")
+                worker.finished_signal.emit(False, "MinerU 转换失败")
+                return
+
+            # Find the generated markdown
+            md_file = None
+            for f in Path(mineru_output).rglob("*.md"):
+                if "_content" not in f.name:
+                    md_file = f
+                    break
+
+            if not md_file:
+                worker.log("错误: 未找到生成的 Markdown 文件")
+                worker.finished_signal.emit(False, "未找到 Markdown")
+                return
+
+            worker.log(f"找到 Markdown: {md_file}")
+
+            # Step 2: Translate
+            worker.log("")
+            worker.log("=" * 50)
+            worker.log("步骤 2: 翻译 Markdown")
+            worker.log("=" * 50)
+
+            try:
+                from mineru.cli.llm_translate import Translator
+                translator = Translator()
+                translated_md = translator.translate(str(md_file))
+                worker.log(f"翻译完成: {translated_md}")
+            except Exception as e:
+                worker.log(f"翻译错误: {e}")
+                worker.finished_signal.emit(False, str(e))
+                return
+
+            # Step 3: Header correction
+            if header_type != "no":
+                worker.log("")
+                worker.log("=" * 50)
+                worker.log("步骤 3: 标题校正")
+                worker.log("=" * 50)
+
+                try:
+                    from mineru.cli.llm_translate import get_corrector
+                    corrector = get_corrector(header_type)
+                    if corrector:
+                        if header_type == "bookmark":
+                            worker.log(f"使用书签校正，关联 PDF: {input_path}")
+                        corrected_md = str(translated_md).replace("_trans", "_correct")
+                        success = corrector.do_correct(translated_md, corrected_md)
+                        if success:
+                            worker.log(f"校正完成: {corrected_md}")
+                            translated_md = corrected_md
+                        else:
+                            worker.log("校正失败，使用原始翻译文件")
+                except Exception as e:
+                    worker.log(f"标题校正错误: {e}")
+
+            # Step 4: Generate PDF
+            if generate_pdf:
+                worker.log("")
+                worker.log("=" * 50)
+                worker.log("步骤 4: 生成 PDF")
+                worker.log("=" * 50)
+
+                try:
+                    import platform
+                    import shutil
+
+                    md_path = Path(translated_md)
+                    dest_md = Path(output_dir) / md_path.name
+                    shutil.copy(md_path, dest_md)
+
+                    if platform.system() == "Linux":
+                        cmd = ["pandoc", str(dest_md), "-o", str(dest_md.with_suffix(".pdf")),
+                               "--pdf-engine=prince", "-V", "mainfont=STSong", "-V", "CJKmainfont=STSong"]
+                    else:
+                        cmd = ["pandoc", str(dest_md), "-o", str(dest_md.with_suffix(".pdf")),
+                               "--pdf-engine=prince"]
+
+                    result = subprocess.run(cmd, capture_output=True, text=True)
+                    if result.returncode == 0:
+                        worker.log(f"PDF 生成完成: {dest_md.with_suffix('.pdf')}")
+                    else:
+                        worker.log(f"PDF 生成失败: {result.stderr}")
+                except Exception as e:
+                    worker.log(f"PDF 生成错误: {e}")
+
+            worker.log("")
+            worker.log("=" * 50)
+            worker.log("工作流 1 完成!")
+            worker.log("=" * 50)
+            worker.finished_signal.emit(True, "工作流 1 完成")
+
+        return workflow
+
+    def _create_workflow2(self, input_path, output_dir):
+        """Create Workflow 2: Markdown → Translate → PDF."""
+        header_type = self.header_type_combo.currentText()
+        generate_pdf = self.generate_pdf_check.isChecked()
+
+        def workflow(worker):
+            # Find associated PDF
+            pdf_path = self._find_pdf_for_markdown(input_path)
+            if pdf_path:
+                worker.log(f"找到关联 PDF: {pdf_path}")
+            else:
+                worker.log("未找到关联 PDF，标题校正将使用 LLM 方式")
+                if header_type == "bookmark":
+                    header_type = "by_llm"
+                    worker.log(f"标题校正方式已改为: {header_type}")
+
+            # Translate
+            worker.log("")
+            worker.log("=" * 50)
+            worker.log("步骤 1: 翻译 Markdown")
+            worker.log("=" * 50)
+
+            try:
+                from mineru.cli.llm_translate import Translator
+                translator = Translator()
+                translated_md = translator.translate(input_path)
+                worker.log(f"翻译完成: {translated_md}")
+            except Exception as e:
+                worker.log(f"翻译错误: {e}")
+                worker.finished_signal.emit(False, str(e))
+                return
+
+            # Header correction
+            if header_type != "no":
+                worker.log("")
+                worker.log("=" * 50)
+                worker.log("步骤 2: 标题校正")
+                worker.log("=" * 50)
+
+                try:
+                    from mineru.cli.llm_translate import get_corrector
+                    corrector = get_corrector(header_type)
+                    if corrector:
+                        corrected_md = str(translated_md).replace("_trans", "_correct")
+                        success = corrector.do_correct(translated_md, corrected_md)
+                        if success:
+                            worker.log(f"校正完成: {corrected_md}")
+                            translated_md = corrected_md
+                        else:
+                            worker.log("校正失败，使用原始翻译文件")
+                except Exception as e:
+                    worker.log(f"标题校正错误: {e}")
+
+            # Generate PDF
+            if generate_pdf:
+                worker.log("")
+                worker.log("=" * 50)
+                worker.log("步骤 3: 生成 PDF")
+                worker.log("=" * 50)
+
+                try:
+                    import platform
+                    import shutil
+
+                    md_path = Path(translated_md)
+                    dest_md = Path(output_dir) / md_path.name
+                    shutil.copy(md_path, dest_md)
+
+                    if platform.system() == "Linux":
+                        cmd = ["pandoc", str(dest_md), "-o", str(dest_md.with_suffix(".pdf")),
+                               "--pdf-engine=prince", "-V", "mainfont=STSong", "-V", "CJKmainfont=STSong"]
+                    else:
+                        cmd = ["pandoc", str(dest_md), "-o", str(dest_md.with_suffix(".pdf")),
+                               "--pdf-engine=prince"]
+
+                    result = subprocess.run(cmd, capture_output=True, text=True)
+                    if result.returncode == 0:
+                        worker.log(f"PDF 生成完成: {dest_md.with_suffix('.pdf')}")
+                    else:
+                        worker.log(f"PDF 生成失败: {result.stderr}")
+                except Exception as e:
+                    worker.log(f"PDF 生成错误: {e}")
+
+            worker.log("")
+            worker.log("=" * 50)
+            worker.log("工作流 2 完成!")
+            worker.log("=" * 50)
+            worker.finished_signal.emit(True, "工作流 2 完成")
+
+        return workflow
+
+    def _create_workflow3(self, input_path, output_dir):
+        """Create Workflow 3: PDF → MinerU → Markdown."""
+        backend = "CPU" if self.radio_cpu.isChecked() else "GPU"
+        working_dir = str(Path(__file__).parent.parent.parent)
+
+        def workflow(worker):
+            cmd = ["uv", "run", "mineru", "-p", input_path, "-o", output_dir]
+            if backend == "CPU":
+                cmd.extend(["-b", "pipeline"])
+
+            worker.log(f"$ {' '.join(cmd)}")
+
+            returncode = worker.run_process(cmd, working_dir)
+
+            if returncode == 0:
+                worker.log("=" * 50)
+                worker.log("工作流 3 完成!")
+                worker.log("=" * 50)
+                worker.finished_signal.emit(True, "工作流 3 完成")
+            else:
+                worker.log(f"工作流 3 失败，退出码: {returncode}")
+                worker.finished_signal.emit(False, f"失败 (退出码: {returncode})")
+
+        return workflow
+
+    def _cancel(self):
+        """Cancel the running process."""
+        # Kill subprocess if running
+        if hasattr(self, 'mineru_process') and self.mineru_process is not None:
+            try:
+                self.mineru_process.terminate()
+                self.mineru_process.wait(timeout=5)
+            except:
+                try:
+                    self.mineru_process.kill()
+                except:
+                    pass
+            self.mineru_process = None
+
+        if hasattr(self, 'worker_thread') and self.worker_thread.isRunning():
+            self.worker._is_running = False
+            self.worker_thread.quit()
+            self.worker_thread.wait(3000)
+            self.log_text.append("\n[进程已被用户取消]")
+            self._enable_buttons()
+            self._notify("MinerU", "任务已取消")
 
     def _enable_buttons(self):
         """Re-enable run button."""
         self.run_btn.setEnabled(True)
         self.cancel_btn.setEnabled(False)
-
-    def _cancel(self):
-        """Cancel the running process."""
-        if self.process and self.process.state() != QProcess.ProcessState.NotRunning:
-            self.process.kill()
-            self.log_text.append("\n[进程已被用户取消]")
-            self._notify("MinerU", "任务已取消")
-
-    def _on_output(self):
-        """Handle process output."""
-        if self.process:
-            data = self.process.readAllStandardOutput().data().decode("utf-8", errors="replace")
-            if data:
-                self.log_text.append(data.rstrip())
-                # Trim excess lines
-                doc = self.log_text.document()
-                if doc.blockCount() > MAX_LOG_LINES:
-                    cursor = self.log_text.cursor()
-                    cursor.movePosition(cursor.MoveOperation.Start)
-                    cursor.movePosition(
-                        cursor.MoveOperation.Down,
-                        cursor.MoveMode.KeepAnchor,
-                        doc.blockCount() - MAX_LOG_LINES,
-                    )
-                    cursor.removeSelectedText()
-                # Auto-scroll
-                sb = self.log_text.verticalScrollBar()
-                sb.setValue(sb.maximum())
-
-    def _on_finished(self, exit_code, exit_status):
-        """Handle process finished."""
-        self.log_text.append(f"\n[进程结束，退出码 {exit_code}]")
-        self._enable_buttons()
-        self.process = None
-        if exit_code == 0:
-            self._notify("MinerU", "任务完成")
-        else:
-            self._notify("MinerU", f"任务失败 (退出码: {exit_code})")
-
-    def _on_error(self, error):
-        """Handle process error."""
-        self.log_text.append(f"\n[进程错误: {error.name}]")
-        self._enable_buttons()
-        self.process = None
-        self._notify("MinerU", f"进程错误: {error.name}")
 
     def _notify(self, title, body):
         """Send desktop notification."""
@@ -712,7 +779,19 @@ class MinerUGui(QMainWindow if HAS_PYQT6 else object):
 
     def closeEvent(self, event):
         """Handle window close."""
-        if self.process and self.process.state() != QProcess.ProcessState.NotRunning:
+        # Kill subprocess if running
+        if hasattr(self, 'mineru_process') and self.mineru_process is not None:
+            try:
+                self.mineru_process.terminate()
+                self.mineru_process.wait(timeout=5)
+            except:
+                try:
+                    self.mineru_process.kill()
+                except:
+                    pass
+            self.mineru_process = None
+
+        if hasattr(self, 'worker_thread') and self.worker_thread.isRunning():
             reply = QMessageBox.question(
                 self, "确认退出",
                 "有任务正在运行，是否终止?",
@@ -720,8 +799,9 @@ class MinerUGui(QMainWindow if HAS_PYQT6 else object):
                 QMessageBox.StandardButton.No,
             )
             if reply == QMessageBox.StandardButton.Yes:
-                self.process.kill()
-                self.process.waitForFinished(3000)
+                self.worker._is_running = False
+                self.worker_thread.quit()
+                self.worker_thread.wait(3000)
                 event.accept()
             else:
                 event.ignore()
