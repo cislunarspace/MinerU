@@ -36,6 +36,23 @@ except ImportError:
 MAX_LOG_LINES = 500
 
 
+def build_command(input_path, output_dir, backend):
+    cmd = ["uv", "run", "mineru", "-p", input_path, "-o", output_dir]
+    if backend == "CPU":
+        return [*cmd, "-b", "pipeline"]
+    return cmd
+
+
+def validate_input(input_path):
+    if not input_path or not input_path.strip():
+        return "Input path is empty"
+
+    if not Path(input_path).exists():
+        return f"Path does not exist: {input_path}"
+
+    return None
+
+
 class LLMConfigDialog(QDialog):
     """LLM configuration dialog."""
 
@@ -437,13 +454,9 @@ class MinerUGui(QMainWindow if HAS_PYQT6 else object):
         output_dir = self.output_dir_edit.text().strip()
 
         # Validate input
-        if not input_path:
-            QMessageBox.warning(self, "输入错误", "输入路径不能为空")
-            return
-
-        p = Path(input_path)
-        if not p.exists():
-            QMessageBox.warning(self, "输入错误", f"路径不存在: {input_path}")
+        input_error = validate_input(input_path)
+        if input_error:
+            QMessageBox.warning(self, "输入错误", input_error)
             return
 
         # Validate output
@@ -523,9 +536,7 @@ class MinerUGui(QMainWindow if HAS_PYQT6 else object):
             mineru_output = os.path.join(output_dir, "mineru_output")
             os.makedirs(mineru_output, exist_ok=True)
 
-            cmd = ["uv", "run", "mineru", "-p", input_path, "-o", mineru_output]
-            if backend == "CPU":
-                cmd.extend(["-b", "pipeline"])
+            cmd = build_command(input_path, mineru_output, backend)
 
             # Run mineru with process tracking for killability
             worker.log(f"$ {' '.join(cmd)}")
@@ -633,6 +644,7 @@ class MinerUGui(QMainWindow if HAS_PYQT6 else object):
         generate_pdf = self.generate_pdf_check.isChecked()
 
         def workflow(worker):
+            nonlocal header_type
             # Find associated PDF
             pdf_path = self._find_pdf_for_markdown(input_path)
             if pdf_path:
@@ -724,9 +736,7 @@ class MinerUGui(QMainWindow if HAS_PYQT6 else object):
         working_dir = str(Path(__file__).parent.parent.parent)
 
         def workflow(worker):
-            cmd = ["uv", "run", "mineru", "-p", input_path, "-o", output_dir]
-            if backend == "CPU":
-                cmd.extend(["-b", "pipeline"])
+            cmd = build_command(input_path, output_dir, backend)
 
             worker.log(f"$ {' '.join(cmd)}")
 
