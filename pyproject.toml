@@ -112,6 +112,7 @@ gui = [
 translate = [
     "langchain-core>=0.3.0",
     "langchain-openai>=0.2.0",
+    "langchain-text-splitters>=0.3.0",
     "tiktoken>=0.7.0",
     "pypandoc>=1.0.0",
     "openai>=1.70.0,<3",

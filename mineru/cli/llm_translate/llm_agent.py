@@ -4,7 +4,6 @@ from pathlib import Path
 
 from langchain_core.prompts import PromptTemplate
 from langchain_openai import ChatOpenAI
-from langchain.chains import LLMChain
 
 from mineru.cli.llm_translate.config import get_conf
 from mineru.cli.llm_translate.llm_rate_control import RateControl
@@ -39,21 +38,19 @@ class LLmAgent:
         return prompt_str
 
     def ask_llm_by_api(self, prompt, prompt_var):
-        prompt = PromptTemplate.from_template(prompt)
+        prompt_str = self.format_prompt(prompt, prompt_var)
 
         llm = ChatOpenAI(base_url=self.base_url, model_name=self.model_name, api_key=self.api_key, timeout=self.timeout,
                          max_retries=self.max_retries, temperature=0, streaming=self.streaming)
-        chain = LLMChain(
-            llm=llm,
-            prompt=prompt
-        )
+        response = llm.invoke(prompt_str)
+        return self.normalize_response_content(response.content)
 
-        if isinstance(prompt_var, str):
-            output = chain(prompt_var)
-            text = output['text']
-        else:
-            text = chain.run(**prompt_var)
-        return text
+    def normalize_response_content(self, content):
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            return ''.join(part.get('text', str(part)) if isinstance(part, dict) else str(part) for part in content)
+        return str(content)
 
     def in_cache(self, prompt, prompt_var):
         if not self.use_cache:

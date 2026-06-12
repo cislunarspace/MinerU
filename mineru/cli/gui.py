@@ -194,13 +194,16 @@ class WorkflowWorker(QObject):
             env=env,
         )
 
-        assert self.parent.mineru_process.stdout is not None
-        for line in iter(self.parent.mineru_process.stdout.readline, ""):
+        # Keep a local reference so a concurrent cancel/reset cannot turn this
+        # into a None.wait() call while we are still draining the pipe.
+        process = self.parent.mineru_process
+        assert process.stdout is not None
+        for line in iter(process.stdout.readline, ""):
             if not self._is_running:
                 break
             self.log(line.rstrip())
 
-        returncode = self.parent.mineru_process.wait()
+        returncode = process.wait()
         self.parent.mineru_process = None
         return returncode
 
@@ -360,12 +363,16 @@ class MinerUGui(QMainWindow if HAS_PYQT6 else object):
         # --- Action buttons ---
         btn_layout = QHBoxLayout()
         btn_layout.addStretch()
+        self.open_output_btn = QPushButton("打开输出目录")
+        self.open_output_btn.setEnabled(False)
+        self.open_output_btn.clicked.connect(self._open_output_dir)
         self.run_btn = QPushButton("开始处理")
         self.run_btn.setDefault(True)
         self.run_btn.clicked.connect(self._run)
         self.cancel_btn = QPushButton("停止")
         self.cancel_btn.clicked.connect(self._cancel)
         self.cancel_btn.setEnabled(False)
+        btn_layout.addWidget(self.open_output_btn)
         btn_layout.addWidget(self.run_btn)
         btn_layout.addWidget(self.cancel_btn)
         layout.addLayout(btn_layout)
@@ -594,6 +601,7 @@ class MinerUGui(QMainWindow if HAS_PYQT6 else object):
 
         # Initialize process tracking
         self.mineru_process = None
+        self._last_output_dir = output_dir
 
         # Create worker and thread (worker must have no parent to be movable)
         self.worker = WorkflowWorker(self)  # Pass GUI as parent reference
@@ -604,9 +612,13 @@ class MinerUGui(QMainWindow if HAS_PYQT6 else object):
         workflow_func = self._build_workflow(input_path, output_dir)
         self.worker.workflow_func = workflow_func
 
-        # Connect signals
+        # Connect signals with explicit queued connection so the slot always
+        # runs in the GUI thread, never in the worker thread.
         self.worker.log_signal.connect(self._append_log)
-        self.worker.finished_signal.connect(self._on_workflow_finished)
+        self.worker.finished_signal.connect(
+            self._on_workflow_finished,
+            type=Qt.ConnectionType.QueuedConnection,
+        )
 
         # Connect started signal to worker method so it runs in worker thread
         self.worker_thread.started.connect(self.worker.do_work)
@@ -637,19 +649,17 @@ class MinerUGui(QMainWindow if HAS_PYQT6 else object):
         self._enable_buttons()
         self._set_status("error" if not success else "success",
                          "失败" if not success else "完成")
+        self.open_output_btn.setEnabled(success)
         if success:
             self._notify("MinerU", message)
         else:
             self._notify("MinerU", f"任务失败: {message}")
 
     def _set_status(self, state, text=""):
-        """Update status LED and text.
+        """Update status text.
 
         state: idle | running | error | success
         """
-        self.status_led.setProperty("state", state)
-        self.status_led.style().unpolish(self.status_led)
-        self.status_led.style().polish(self.status_led)
         if text:
             self.status_text.setText(text)
         elif state == "idle":
@@ -928,6 +938,7 @@ class MinerUGui(QMainWindow if HAS_PYQT6 else object):
             self.log_text.append("\n[进程已被用户停止]")
             self._set_status("idle")
             self._enable_buttons()
+            self.open_output_btn.setEnabled(False)
             self._notify("MinerU", "任务已停止")
 
     def _enable_buttons(self):
@@ -937,12 +948,41 @@ class MinerUGui(QMainWindow if HAS_PYQT6 else object):
         if self.status_text.text() == "处理中":
             self._set_status("idle")
 
+    def _open_output_dir(self):
+        """Open the last output directory in the platform file manager."""
+        output_dir = getattr(self, "_last_output_dir", None)
+        if not output_dir:
+            return
+        directory = Path(output_dir)
+        if not directory.exists():
+            QMessageBox.warning(self, "路径不存在", f"输出目录不存在: {directory}")
+            return
+        if directory.is_file():
+            directory = directory.parent
+        if sys.platform.startswith("linux"):
+            try:
+                subprocess.Popen(["xdg-open", str(directory)])
+            except FileNotFoundError:
+                QMessageBox.warning(self, "无法打开", "未找到 xdg-open 命令")
+        elif sys.platform == "darwin":
+            try:
+                subprocess.Popen(["open", str(directory)])
+            except FileNotFoundError:
+                QMessageBox.warning(self, "无法打开", "未找到 open 命令")
+        elif sys.platform == "win32":
+            try:
+                subprocess.Popen(["explorer", str(directory)])
+            except FileNotFoundError:
+                QMessageBox.warning(self, "无法打开", "未找到 explorer 命令")
+
     def _notify(self, title, body):
-        """Send desktop notification."""
-        try:
-            subprocess.Popen(["notify-send", title, body])
-        except FileNotFoundError:
-            pass
+        """Send a plain desktop notification."""
+        if sys.platform.startswith("linux"):
+            try:
+                subprocess.Popen(["notify-send", title, body])
+            except FileNotFoundError:
+                pass
+        # Cross-platform seam: extend here for macOS / Windows adapters.
 
     def _close_or_cancel(self, event):
         """Shared logic for close/cancel prompt."""
