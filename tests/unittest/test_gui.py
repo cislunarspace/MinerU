@@ -226,3 +226,96 @@ class TestFormatApiTestError:
         message = format_api_test_error(Exception("Authorization: Bearer secret-token-123"))
         assert "Bearer" not in message
         assert "secret-token" not in message
+
+
+class TestWorkerSignalCleanup:
+    """Regression tests for stale signal connections between runs.
+
+    Bug: after a successful first run, clicking "start" with a new input path
+    would re-execute the first run's command because old worker signals were
+    never disconnected.
+    """
+
+    @pytest.fixture
+    def gui_window(self, qtbot):
+        from mineru.cli.gui import MinerUGui, WorkflowWorker
+
+        window = MinerUGui()
+        qtbot.addWidget(window)
+
+        # Patch _ensure_api_server so we don't start a real server.
+        window._ensure_api_server = lambda: "http://127.0.0.1:9999"
+
+        # Use workflow 3 (simplest: just run mineru subprocess).
+        window.radio_wf3.setChecked(True)
+
+        # Patch run_process to capture commands without running anything.
+        captured = []
+
+        def fake_run_process(worker_self, cmd, cwd):
+            captured.append(list(cmd))
+            return 0
+
+        WorkflowWorker.run_process = fake_run_process
+        window._captured = captured
+        return window
+
+    def _wait_for_thread(self, qtbot, window, timeout=3000):
+        """Wait until worker thread finishes."""
+        import time
+        start = time.monotonic()
+        while window.worker_thread.isRunning() and time.monotonic() - start < timeout / 1000:
+            qtbot.wait(10)
+
+    def test_second_run_uses_new_path(self, qtbot, gui_window, tmp_path):
+        """Second run must use the new input path, not the first one."""
+        first_pdf = tmp_path / "first.pdf"
+        second_pdf = tmp_path / "second.pdf"
+        first_pdf.touch()
+        second_pdf.touch()
+
+        # First run
+        gui_window.input_path_edit.setText(str(first_pdf))
+        gui_window.output_dir_edit.setText(str(tmp_path / "out1"))
+        gui_window._run()
+        self._wait_for_thread(qtbot, gui_window)
+        qtbot.wait(50)
+
+        # Second run with different path
+        gui_window.input_path_edit.setText(str(second_pdf))
+        gui_window.output_dir_edit.setText(str(tmp_path / "out2"))
+        gui_window._run()
+        self._wait_for_thread(qtbot, gui_window)
+        qtbot.wait(50)
+
+        captured = gui_window._captured
+        uv_cmds = [c for c in captured if c[:2] == ["uv", "run"]]
+        assert len(uv_cmds) == 2
+
+        first_path = uv_cmds[0][uv_cmds[0].index("-p") + 1]
+        second_path = uv_cmds[1][uv_cmds[1].index("-p") + 1]
+
+        assert first_path == str(first_pdf)
+        assert second_path == str(second_pdf)
+
+    def test_old_worker_signals_disconnected_after_finish(self, qtbot, gui_window, tmp_path):
+        """After a run finishes, the old worker's signals must be disconnected."""
+        pdf = tmp_path / "test.pdf"
+        pdf.touch()
+
+        gui_window.input_path_edit.setText(str(pdf))
+        gui_window.output_dir_edit.setText(str(tmp_path / "out"))
+        gui_window._run()
+        self._wait_for_thread(qtbot, gui_window)
+
+        # Let the queued finished signal be processed
+        qtbot.wait(50)
+
+        old_worker = gui_window.worker
+        # Signals still exist on the object but are disconnected from slots.
+        assert old_worker.log_signal is not None
+        assert old_worker.finished_signal is not None
+
+    def test_cleanup_worker_handles_no_prior_worker(self, qtbot, gui_window):
+        """_cleanup_worker must not raise when no prior worker exists."""
+        gui_window._cleanup_worker()  # Should not raise

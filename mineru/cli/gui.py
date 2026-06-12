@@ -652,6 +652,60 @@ class MinerUGui(QMainWindow if HAS_PYQT6 else object):
 
         return None
 
+    def _cleanup_worker(self):
+        """Disconnect old worker signals and stop old thread.
+
+        Must be called from the GUI thread before creating a new worker/thread
+        pair to prevent stale signal connections from firing.
+        """
+        old_worker = getattr(self, 'worker', None)
+        old_thread = getattr(self, 'worker_thread', None)
+
+        if old_worker is not None:
+            old_worker.stop()
+            try:
+                old_worker.log_signal.disconnect(self._append_log)
+            except (RuntimeError, TypeError):
+                pass
+            try:
+                old_worker.finished_signal.disconnect(self._on_workflow_finished)
+            except (RuntimeError, TypeError):
+                pass
+
+        if old_thread is not None:
+            try:
+                old_thread.started.disconnect()
+            except (RuntimeError, TypeError):
+                pass
+            if old_thread.isRunning():
+                old_thread.quit()
+                old_thread.wait(3000)
+
+    def _disconnect_current_worker_signals(self):
+        """Disconnect the current worker's signals without stopping the thread.
+
+        Called from _on_workflow_finished to ensure old worker signals cannot
+        fire after the handler returns and the user starts a new run.
+        """
+        worker = getattr(self, 'worker', None)
+        thread = getattr(self, 'worker_thread', None)
+
+        if worker is not None:
+            try:
+                worker.log_signal.disconnect(self._append_log)
+            except (RuntimeError, TypeError):
+                pass
+            try:
+                worker.finished_signal.disconnect(self._on_workflow_finished)
+            except (RuntimeError, TypeError):
+                pass
+
+        if thread is not None:
+            try:
+                thread.started.disconnect()
+            except (RuntimeError, TypeError):
+                pass
+
     def _run(self):
         """Run the selected workflow."""
         input_path = self.input_path_edit.text().strip()
@@ -670,6 +724,9 @@ class MinerUGui(QMainWindow if HAS_PYQT6 else object):
 
         # Create output directory if needed
         os.makedirs(output_dir, exist_ok=True)
+
+        # Tear down any previous worker/thread before starting a new one.
+        self._cleanup_worker()
 
         # Disable buttons to prevent concurrent execution
         self.run_btn.setEnabled(False)
@@ -721,7 +778,10 @@ class MinerUGui(QMainWindow if HAS_PYQT6 else object):
         self.log_text.append(f"[{timestamp}] {message}")
 
     def _on_workflow_finished(self, success, message):
-        """Handle workflow finished (called from worker thread)."""
+        """Handle workflow finished (called in GUI thread via QueuedConnection)."""
+        # Disconnect signals to prevent stale emissions if a new run starts.
+        self._disconnect_current_worker_signals()
+
         # Stop the worker thread
         if hasattr(self, 'worker_thread') and self.worker_thread.isRunning():
             self.worker_thread.quit()
@@ -1013,6 +1073,7 @@ class MinerUGui(QMainWindow if HAS_PYQT6 else object):
 
         if hasattr(self, 'worker_thread') and self.worker_thread.isRunning():
             self.worker._is_running = False
+            self._disconnect_current_worker_signals()
             self.worker_thread.quit()
             self.worker_thread.wait(3000)
             self.log_text.append("\n[进程已被用户停止]")
