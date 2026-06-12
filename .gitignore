@@ -28,8 +28,9 @@ dist/
 .DS_Store
 .env
 
-# Local config (may contain secrets)
+# Local config and runtime data (may contain secrets)
 conf.yaml
+cache/
 
 bad_words/
 bak/
