@@ -93,3 +93,136 @@ class TestValidateInput:
         error = validate_input("/nonexistent/path/that/does/not/exist")
         assert error is not None
         assert "not exist" in error.lower() or "found" in error.lower()
+
+
+class TestLLMConfigDialog:
+    """Tests for the LLM configuration dialog."""
+
+    @pytest.fixture
+    def dialog(self, qtbot):
+        from PyQt6.QtCore import Qt
+        from mineru.cli.gui import LLMConfigDialog
+        widget = LLMConfigDialog()
+        qtbot.addWidget(widget)
+        return widget
+
+    def test_dialog_has_test_api_button(self, dialog):
+        assert dialog.test_btn is not None
+        assert "测试" in dialog.test_btn.text()
+
+    def test_test_button_is_disabled_during_test(self, qtbot, dialog, monkeypatch):
+        from mineru.cli.llm_translate.api_tester import TestApiWorker
+
+        dialog.base_url_edit.setText("https://api.example.com")
+        dialog.model_name_edit.setText("test-model")
+        dialog.api_key_edit.setText("sk-test")
+
+        monkeypatch.setattr(TestApiWorker, "run", lambda self, base_url, model_name, api_key: None)
+
+        assert dialog.test_btn.isEnabled()
+        assert dialog.save_btn.isEnabled()
+
+        dialog._on_test_api()
+        qtbot.wait(50)
+
+        assert not dialog.test_btn.isEnabled()
+        assert not dialog.save_btn.isEnabled()
+
+    def test_successful_test_shows_result(self, qtbot, dialog, monkeypatch):
+        from mineru.cli.llm_translate.api_tester import TestApiWorker
+
+        dialog.base_url_edit.setText("https://api.example.com")
+        dialog.model_name_edit.setText("test-model")
+        dialog.api_key_edit.setText("sk-test")
+
+        def fake_run(self, base_url, model_name, api_key):
+            self.test_finished.emit("你好，世界！")
+
+        monkeypatch.setattr(TestApiWorker, "run", fake_run)
+
+        dialog._on_test_api()
+        qtbot.wait(50)
+
+        assert "测试成功" in dialog.status_label.text()
+        assert "你好，世界" in dialog.status_label.text()
+
+    def test_failed_test_shows_error(self, qtbot, dialog, monkeypatch):
+        from PyQt6.QtWidgets import QMessageBox
+        from mineru.cli.llm_translate.api_tester import TestApiWorker
+
+        dialog.base_url_edit.setText("https://api.example.com")
+        dialog.model_name_edit.setText("test-model")
+        dialog.api_key_edit.setText("sk-test")
+
+        def fake_run(self, base_url, model_name, api_key):
+            self.test_failed.emit("API Key 无效")
+
+        monkeypatch.setattr(TestApiWorker, "run", fake_run)
+        monkeypatch.setattr(QMessageBox, "warning", lambda *args, **kwargs: None)
+
+        dialog._on_test_api()
+        qtbot.wait(50)
+
+        assert "测试失败" in dialog.status_label.text()
+        assert "API Key 无效" in dialog.status_label.text()
+
+    def test_empty_field_validation(self, qtbot, dialog, monkeypatch):
+        from PyQt6.QtWidgets import QMessageBox
+
+        dialog.base_url_edit.setText("")
+        dialog.model_name_edit.setText("test-model")
+        dialog.api_key_edit.setText("sk-test")
+
+        monkeypatch.setattr(QMessageBox, "warning", lambda *args, **kwargs: None)
+
+        dialog._on_test_api()
+        qtbot.wait(50)
+
+        assert "测试失败" in dialog.status_label.text()
+        assert "完整" in dialog.status_label.text()
+
+
+class TestFormatApiTestError:
+    """Tests for the API test error formatter."""
+
+    def test_timeout_error(self):
+        from mineru.cli.llm_translate.api_tester import format_api_test_error
+        assert "超时" in format_api_test_error(TimeoutError("Request timed out"))
+
+    def test_unauthorized_error(self):
+        from mineru.cli.llm_translate.api_tester import format_api_test_error
+        assert "API Key 无效" in format_api_test_error(Exception("401 Unauthorized"))
+
+    def test_not_found_error(self):
+        from mineru.cli.llm_translate.api_tester import format_api_test_error
+        assert "模型不存在" in format_api_test_error(Exception("404 Not Found"))
+
+    def test_connection_error(self):
+        from mineru.cli.llm_translate.api_tester import format_api_test_error
+        assert "无法连接" in format_api_test_error(ConnectionError("Connection refused"))
+
+    def test_unknown_error(self):
+        from mineru.cli.llm_translate.api_tester import format_api_test_error
+        message = format_api_test_error(ValueError("unknown problem"))
+        assert "测试异常" in message
+        assert "unknown problem" in message
+
+    def test_forbidden_error(self):
+        from mineru.cli.llm_translate.api_tester import format_api_test_error
+        assert "访问被拒绝" in format_api_test_error(Exception("403 Forbidden"))
+
+    def test_rate_limit_error(self):
+        from mineru.cli.llm_translate.api_tester import format_api_test_error
+        assert "过于频繁" in format_api_test_error(Exception("429 Too Many Requests"))
+
+    def test_error_message_sanitizes_api_key(self):
+        from mineru.cli.llm_translate.api_tester import format_api_test_error
+        message = format_api_test_error(Exception("failed with sk-abc123xyz789secretKey"))
+        assert "sk-" not in message
+        assert "***" in message
+
+    def test_error_message_sanitizes_bearer_token(self):
+        from mineru.cli.llm_translate.api_tester import format_api_test_error
+        message = format_api_test_error(Exception("Authorization: Bearer secret-token-123"))
+        assert "Bearer" not in message
+        assert "secret-token" not in message

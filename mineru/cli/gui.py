@@ -62,6 +62,9 @@ def validate_input(input_path):
     return None
 
 
+from mineru.cli.llm_translate.api_tester import TestApiWorker
+
+
 class LLMConfigDialog(QDialog):
     """LLM configuration dialog."""
 
@@ -69,6 +72,7 @@ class LLMConfigDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("模型接口设置")
         self.setMinimumWidth(420)
+        self._test_worker = None
         self._init_ui()
 
     def _init_ui(self):
@@ -93,6 +97,11 @@ class LLMConfigDialog(QDialog):
 
         layout.addWidget(api_group)
 
+        # Test status
+        self.status_label = QLabel("")
+        self.status_label.setWordWrap(True)
+        layout.addWidget(self.status_label)
+
         # Buttons
         btn_layout = QHBoxLayout()
         self.save_btn = QPushButton("应用配置")
@@ -100,10 +109,81 @@ class LLMConfigDialog(QDialog):
         self.save_btn.clicked.connect(self.accept)
         self.cancel_btn = QPushButton("关闭")
         self.cancel_btn.clicked.connect(self.reject)
+        self.test_btn = QPushButton("测试连接")
+        self.test_btn.clicked.connect(self._on_test_api)
         btn_layout.addStretch()
         btn_layout.addWidget(self.cancel_btn)
+        btn_layout.addWidget(self.test_btn)
         btn_layout.addWidget(self.save_btn)
         layout.addLayout(btn_layout)
+
+    def _on_test_api(self):
+        """Handle test API button click."""
+        if self._test_worker is not None and self._test_worker.is_running():
+            return
+
+        base_url = self.base_url_edit.text().strip()
+        model_name = self.model_name_edit.text().strip()
+        api_key = self.api_key_edit.text().strip()
+
+        if not base_url or not model_name or not api_key:
+            self.status_label.setText("测试失败：请填写完整的 API 信息")
+            QMessageBox.warning(self, "输入错误", "请填写服务端点、模型标识和访问密钥")
+            return
+
+        self.status_label.setText("测试中...")
+        self._set_testing_ui(False)
+
+        if self._test_worker is not None:
+            self._disconnect_test_worker(self._test_worker)
+
+        self._test_worker = TestApiWorker()
+        self._test_worker.test_finished.connect(self._on_test_finished)
+        self._test_worker.test_failed.connect(self._on_test_failed)
+        self._test_worker.run(base_url, model_name, api_key)
+
+    def _disconnect_test_worker(self, worker):
+        """Disconnect worker signals from dialog slots."""
+        try:
+            worker.test_finished.disconnect(self._on_test_finished)
+        except RuntimeError:
+            pass
+        try:
+            worker.test_failed.disconnect(self._on_test_failed)
+        except RuntimeError:
+            pass
+
+    def _cleanup_test_worker(self):
+        """Clean up the current test worker if any."""
+        if self._test_worker is None:
+            return
+        self._disconnect_test_worker(self._test_worker)
+        self._test_worker.stop()
+        self._test_worker = None
+
+    def _on_test_finished(self, result):
+        """Handle successful API test."""
+        summary = result[:50]
+        self.status_label.setText(f"测试成功：{summary}")
+        self._set_testing_ui(True)
+        self._cleanup_test_worker()
+
+    def _on_test_failed(self, message):
+        """Handle failed API test."""
+        self.status_label.setText(f"测试失败：{message}")
+        QMessageBox.warning(self, "测试失败", message)
+        self._set_testing_ui(True)
+        self._cleanup_test_worker()
+
+    def reject(self):
+        """Handle dialog close/reject while a test may be running."""
+        self._cleanup_test_worker()
+        super().reject()
+
+    def _set_testing_ui(self, enabled):
+        """Enable or disable buttons during testing."""
+        self.test_btn.setEnabled(enabled)
+        self.save_btn.setEnabled(enabled)
 
     def load_config(self, config):
         """Load config into the dialog."""
