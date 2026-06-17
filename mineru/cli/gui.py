@@ -1,5 +1,6 @@
 # Copyright (c) Opendatalab. All rights reserved.
 
+import json
 import os
 import socket
 import subprocess
@@ -43,13 +44,57 @@ except ImportError:
 MAX_LOG_LINES = 500
 
 
-def build_command(input_path, output_dir, backend, api_url=None):
+def build_command(input_path, output_dir, backend, api_url=None,
+                  failure_report_path=None):
     cmd = ["uv", "run", "mineru", "-p", input_path, "-o", output_dir]
     if backend == "CPU":
         cmd.extend(["-b", "pipeline"])
     if api_url:
         cmd.extend(["--api-url", api_url])
+    if failure_report_path:
+        cmd.extend(["--failure-report-path", str(failure_report_path)])
     return cmd
+
+
+def load_failure_report(report_path):
+    """Load a failure report JSON file. Returns None if missing or malformed."""
+    if report_path is None or not report_path.exists():
+        return None
+    try:
+        with open(report_path, "r", encoding="utf-8") as report_file:
+            payload = json.load(report_file)
+    except (OSError, json.JSONDecodeError):
+        return None
+    failures = payload.get("failures") if isinstance(payload, dict) else None
+    if not isinstance(failures, list):
+        return None
+    return failures
+
+
+def format_failure_summary(failures):
+    """Build a one-line summary suitable for status bar and notification."""
+    if not failures:
+        return "失败"
+    count = len(failures)
+    noun = "文件" if count == 1 else "文件"
+    first_doc = failures[0].get("documents") or ["?"]
+    first_name = first_doc[0] if first_doc else "?"
+    if count == 1:
+        return f"失败：{first_name} 处理失败"
+    return f"失败：{first_name} 等 {count} 个文件处理失败"
+
+
+def format_failure_details(failures):
+    """Build the multi-line detail block written to the log area."""
+    if not failures:
+        return []
+    lines = ["失败详情："]
+    for failure in failures:
+        documents = failure.get("documents") or ["?"]
+        message = failure.get("message") or "未知错误"
+        for doc in documents:
+            lines.append(f"- {doc}: {message}")
+    return lines
 
 
 def validate_input(input_path):
@@ -772,6 +817,34 @@ class MinerUGui(QMainWindow if HAS_PYQT6 else object):
         else:
             return self._create_workflow3(input_path, output_dir)
 
+    def _make_failure_report_path(self):
+        """Create a unique path for the mineru CLI failure report.
+
+        The caller is responsible for passing this path to the mineru
+        subprocess and for cleaning up the file once it has been read.
+        """
+        fd, path = tempfile.mkstemp(prefix="mineru-gui-failure-", suffix=".json")
+        os.close(fd)
+        return Path(path)
+
+    def _resolve_failure_message(self, worker, report_path, returncode):
+        """Read the CLI failure report and return a (message, details) pair.
+
+        The summary is short enough for the status bar and desktop
+        notification. The details are the multi-line block to log.
+        """
+        failures = load_failure_report(report_path)
+        if not failures:
+            return (
+                f"失败 (退出码: {returncode})",
+                [f"工作流失败，退出码: {returncode}"],
+            )
+        summary = format_failure_summary(failures)
+        details = format_failure_details(failures)
+        for line in details:
+            worker.log(line)
+        return summary, details
+
     def _append_log(self, message):
         """Append message to log text area (called from worker thread)."""
         timestamp = datetime.now().strftime("%H:%M:%S")
@@ -833,105 +906,115 @@ class MinerUGui(QMainWindow if HAS_PYQT6 else object):
             mineru_output = os.path.join(output_dir, "mineru_output")
             os.makedirs(mineru_output, exist_ok=True)
 
-            cmd = build_command(input_path, mineru_output, backend, api_url=api_url)
-
-            # Run mineru with process tracking for killability
-            worker.log(f"$ {' '.join(cmd)}")
-            returncode = worker.run_process(cmd, working_dir)
-
-            if returncode != 0:
-                worker.log(f"MinerU 转换失败，退出码: {returncode}")
-                worker.finished_signal.emit(False, "MinerU 转换失败")
-                return
-
-            # Find the generated markdown
-            md_file = None
-            for f in Path(mineru_output).rglob("*.md"):
-                if "_content" not in f.name:
-                    md_file = f
-                    break
-
-            if not md_file:
-                worker.log("错误: 未找到生成的 Markdown 文件")
-                worker.finished_signal.emit(False, "未找到 Markdown")
-                return
-
-            worker.log(f"找到 Markdown: {md_file}")
-
-            # Step 2: Translate
-            worker.log("")
-            worker.log("=" * 50)
-            worker.log("步骤 2: 翻译 Markdown")
-            worker.log("=" * 50)
+            failure_report_path = self._make_failure_report_path()
+            cmd = build_command(
+                input_path, mineru_output, backend,
+                api_url=api_url, failure_report_path=failure_report_path,
+            )
 
             try:
-                from mineru.cli.llm_translate import Translator
-                translator = Translator()
-                translated_md = translator.translate(str(md_file))
-                worker.log(f"翻译完成: {translated_md}")
-            except Exception as e:
-                worker.log(f"翻译错误: {e}")
-                worker.finished_signal.emit(False, str(e))
-                return
+                # Run mineru with process tracking for killability
+                worker.log(f"$ {' '.join(cmd)}")
+                returncode = worker.run_process(cmd, working_dir)
 
-            # Step 3: Header correction
-            if header_type != "no":
+                if returncode != 0:
+                    worker.log(f"MinerU 转换失败，退出码: {returncode}")
+                    summary, _details = self._resolve_failure_message(
+                        worker, failure_report_path, returncode,
+                    )
+                    worker.finished_signal.emit(False, summary)
+                    return
+
+                # Find the generated markdown
+                md_file = None
+                for f in Path(mineru_output).rglob("*.md"):
+                    if "_content" not in f.name:
+                        md_file = f
+                        break
+
+                if not md_file:
+                    worker.log("错误: 未找到生成的 Markdown 文件")
+                    worker.finished_signal.emit(False, "未找到 Markdown")
+                    return
+
+                worker.log(f"找到 Markdown: {md_file}")
+
+                # Step 2: Translate
                 worker.log("")
                 worker.log("=" * 50)
-                worker.log("步骤 3: 标题校正")
+                worker.log("步骤 2: 翻译 Markdown")
                 worker.log("=" * 50)
 
                 try:
-                    from mineru.cli.llm_translate import get_corrector
-                    corrector = get_corrector(header_type)
-                    if corrector:
-                        if header_type == "bookmark":
-                            worker.log(f"使用书签校正，关联 PDF: {input_path}")
-                        corrected_md = str(translated_md).replace("_trans", "_correct")
-                        success = corrector.do_correct(translated_md, corrected_md)
-                        if success:
-                            worker.log(f"校正完成: {corrected_md}")
-                            translated_md = corrected_md
+                    from mineru.cli.llm_translate import Translator
+                    translator = Translator()
+                    translated_md = translator.translate(str(md_file))
+                    worker.log(f"翻译完成: {translated_md}")
+                except Exception as e:
+                    worker.log(f"翻译错误: {e}")
+                    worker.finished_signal.emit(False, str(e))
+                    return
+
+                # Step 3: Header correction
+                if header_type != "no":
+                    worker.log("")
+                    worker.log("=" * 50)
+                    worker.log("步骤 3: 标题校正")
+                    worker.log("=" * 50)
+
+                    try:
+                        from mineru.cli.llm_translate import get_corrector
+                        corrector = get_corrector(header_type)
+                        if corrector:
+                            if header_type == "bookmark":
+                                worker.log(f"使用书签校正，关联 PDF: {input_path}")
+                            corrected_md = str(translated_md).replace("_trans", "_correct")
+                            success = corrector.do_correct(translated_md, corrected_md)
+                            if success:
+                                worker.log(f"校正完成: {corrected_md}")
+                                translated_md = corrected_md
+                            else:
+                                worker.log("校正失败，使用原始翻译文件")
+                    except Exception as e:
+                        worker.log(f"标题校正错误: {e}")
+
+                # Step 4: Generate PDF
+                if generate_pdf:
+                    worker.log("")
+                    worker.log("=" * 50)
+                    worker.log("步骤 4: 生成 PDF")
+                    worker.log("=" * 50)
+
+                    try:
+                        import platform
+                        import shutil
+
+                        md_path = Path(translated_md)
+                        dest_md = Path(output_dir) / md_path.name
+                        shutil.copy(md_path, dest_md)
+
+                        if platform.system() == "Linux":
+                            cmd = ["pandoc", str(dest_md), "-o", str(dest_md.with_suffix(".pdf")),
+                                   "--pdf-engine=prince", "-V", "mainfont=STSong", "-V", "CJKmainfont=STSong"]
                         else:
-                            worker.log("校正失败，使用原始翻译文件")
-                except Exception as e:
-                    worker.log(f"标题校正错误: {e}")
+                            cmd = ["pandoc", str(dest_md), "-o", str(dest_md.with_suffix(".pdf")),
+                                   "--pdf-engine=prince"]
 
-            # Step 4: Generate PDF
-            if generate_pdf:
+                        result = subprocess.run(cmd, capture_output=True, text=True)
+                        if result.returncode == 0:
+                            worker.log(f"PDF 生成完成: {dest_md.with_suffix('.pdf')}")
+                        else:
+                            worker.log(f"PDF 生成失败: {result.stderr}")
+                    except Exception as e:
+                        worker.log(f"PDF 生成错误: {e}")
+
                 worker.log("")
                 worker.log("=" * 50)
-                worker.log("步骤 4: 生成 PDF")
+                worker.log("工作流 1 完成!")
                 worker.log("=" * 50)
-
-                try:
-                    import platform
-                    import shutil
-
-                    md_path = Path(translated_md)
-                    dest_md = Path(output_dir) / md_path.name
-                    shutil.copy(md_path, dest_md)
-
-                    if platform.system() == "Linux":
-                        cmd = ["pandoc", str(dest_md), "-o", str(dest_md.with_suffix(".pdf")),
-                               "--pdf-engine=prince", "-V", "mainfont=STSong", "-V", "CJKmainfont=STSong"]
-                    else:
-                        cmd = ["pandoc", str(dest_md), "-o", str(dest_md.with_suffix(".pdf")),
-                               "--pdf-engine=prince"]
-
-                    result = subprocess.run(cmd, capture_output=True, text=True)
-                    if result.returncode == 0:
-                        worker.log(f"PDF 生成完成: {dest_md.with_suffix('.pdf')}")
-                    else:
-                        worker.log(f"PDF 生成失败: {result.stderr}")
-                except Exception as e:
-                    worker.log(f"PDF 生成错误: {e}")
-
-            worker.log("")
-            worker.log("=" * 50)
-            worker.log("工作流 1 完成!")
-            worker.log("=" * 50)
-            worker.finished_signal.emit(True, "工作流 1 完成")
+                worker.finished_signal.emit(True, "工作流 1 完成")
+            finally:
+                failure_report_path.unlink(missing_ok=True)
 
         return workflow
 
@@ -1040,20 +1123,29 @@ class MinerUGui(QMainWindow if HAS_PYQT6 else object):
                 worker.finished_signal.emit(False, str(e))
                 return
 
-            cmd = build_command(input_path, output_dir, backend, api_url=api_url)
+            failure_report_path = self._make_failure_report_path()
+            cmd = build_command(
+                input_path, output_dir, backend,
+                api_url=api_url, failure_report_path=failure_report_path,
+            )
 
             worker.log(f"$ {' '.join(cmd)}")
 
             returncode = worker.run_process(cmd, working_dir)
 
             if returncode == 0:
+                failure_report_path.unlink(missing_ok=True)
                 worker.log("=" * 50)
                 worker.log("工作流 3 完成!")
                 worker.log("=" * 50)
                 worker.finished_signal.emit(True, "工作流 3 完成")
             else:
                 worker.log(f"工作流 3 失败，退出码: {returncode}")
-                worker.finished_signal.emit(False, f"失败 (退出码: {returncode})")
+                summary, _details = self._resolve_failure_message(
+                    worker, failure_report_path, returncode,
+                )
+                failure_report_path.unlink(missing_ok=True)
+                worker.finished_signal.emit(False, summary)
 
         return workflow
 

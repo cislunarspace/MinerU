@@ -1,5 +1,6 @@
 # Copyright (c) Opendatalab. All rights reserved.
 import asyncio
+import json
 import os
 import sys
 import threading
@@ -88,6 +89,31 @@ class TaskFailure:
     task_index: int
     document_stems: tuple[str, ...]
     message: str
+
+
+def write_failure_report(
+    failures: list[TaskFailure],
+    report_path: Path,
+) -> None:
+    """Write a user-facing failure summary to report_path as JSON.
+
+    The report contains only task-level failures, not startup or argument
+    errors. It is intended to be consumed by external coordinators (e.g. the
+    GUI), not for developer diagnostics.
+    """
+    payload = {
+        "failures": [
+            {
+                "task_index": failure.task_index,
+                "documents": list(failure.document_stems),
+                "message": failure.message,
+            }
+            for failure in sorted(failures, key=lambda item: item.task_index)
+        ]
+    }
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(report_path, "w", encoding="utf-8") as report_file:
+        json.dump(payload, report_file, ensure_ascii=False, indent=2)
 
 
 @dataclass
@@ -846,6 +872,7 @@ async def run_orchestrated_cli(
     end_page_id: Optional[int],
     formula_enable: bool,
     table_enable: bool,
+    failure_report_path: Optional[Path] = None,
     extra_cli_args: tuple[str, ...] = (),
 ) -> None:
     if start_page_id < 0:
@@ -934,6 +961,8 @@ async def run_orchestrated_cli(
                 ),
             )
             if failures:
+                if failure_report_path is not None:
+                    write_failure_report(failures, failure_report_path)
                 details = "\n".join(
                     f"- task#{failure.task_index} ({', '.join(failure.document_stems)}): {failure.message}"
                     for failure in sorted(failures, key=lambda item: item.task_index)
@@ -1091,6 +1120,17 @@ async def run_orchestrated_cli(
     default=True,
     help="Enable table parsing. Default is True. ",
 )
+@click.option(
+    "--failure-report-path",
+    "failure_report_path",
+    type=click.Path(path_type=Path),
+    default=None,
+    help=(
+        "Write a machine-readable failure report (JSON) to this path when "
+        "any task-level processing failure occurs. If omitted, no report is "
+        "written."
+    ),
+)
 def main(
     ctx: click.Context,
     input_path: Path,
@@ -1104,6 +1144,7 @@ def main(
     end_page_id: Optional[int],
     formula_enable: bool,
     table_enable: bool,
+    failure_report_path: Optional[Path],
 ) -> None:
     asyncio.run(
         run_orchestrated_cli(
@@ -1118,6 +1159,7 @@ def main(
             end_page_id=end_page_id,
             formula_enable=formula_enable,
             table_enable=table_enable,
+            failure_report_path=failure_report_path,
             extra_cli_args=tuple(ctx.args),
         )
     )
