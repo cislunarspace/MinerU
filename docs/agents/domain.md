@@ -1,35 +1,44 @@
-# Domain Docs
+# 领域文档
 
-How the engineering skills should consume this repo's domain documentation when exploring the codebase.
+## 概述
 
-## Before exploring, read these
+本项目的领域知识存放在两处，供 agent 和人类共用：
 
-- **`CONTEXT.md`** at the repo root
-- **`docs/adr/`** — read ADRs that touch the area you're about to work in.
+- **`CONTEXT.md`**（根目录）——单一上下文文件，汇集架构、术语、数据模型和业务规则，是 agent 的首选入口。
+- **`docs/adr/`** ——架构决策记录，记录每项重要技术选型和设计决策的背景与理由。
 
-If any of these files don't exist, **proceed silently**. Don't flag their absence; don't suggest creating them upfront. The producer skill (`/grill-with-docs`) creates them lazily when terms or decisions actually get resolved.
+两份文档均**惰性创建**：由 `/grill-with-docs` 在压力测试计划或设计时生成并持续更新，无需手动维护。
 
-## File structure
+## 使用场景
 
-This is a single-context repo:
+| 角色 | 操作 |
+|------|------|
+| **Agent** | 读取 `CONTEXT.md` 获取项目语境；在架构讨论中查阅 `docs/adr/`。 |
+| **人类** | 向 `CONTEXT.md` 补充新的术语或规则；通过 `/grill-with-docs` 触发 ADR 编写。 |
+
+## 文件结构
 
 ```
-/
-├── CONTEXT.md
-├── docs/adr/
-│   ├── 0001-some-decision.md
-│   └── 0002-another-decision.md
-└── src/
+CONTEXT.md              # 根目录，唯一必读文件
+docs/adr/
+  0001-adr-template.md  # 模板
+  0002-xxx.md           # 按编号递增的决策记录
 ```
 
-## Use the glossary's vocabulary
+## CONTEXT.md 规范
 
-When your output names a domain concept (in an issue title, a refactor proposal, a hypothesis, a test name), use the term as defined in `CONTEXT.md`. Don't drift to synonyms the glossary explicitly avoids.
+- 扁平结构，用 `##` 分节（架构、术语、数据模型、业务规则、已知限制等）。
+- 只记事实，不讲故事；每条信息应能在 10 秒内被 agent 或人类理解。
+- 有新增知识就地补充，不另起文件；保持单一信息源。
 
-If the concept you need isn't in the glossary yet, that's a signal — either you're inventing language the project doesn't use (reconsider) or there's a real gap (note it for `/grill-with-docs`).
+## ADR 规范
 
-## Flag ADR conflicts
+采用 [Michael Nygard 模板](https://cognitect.com/blog/2011/11/15/documenting-architecture-decisions)，每份 ADR 包含：
 
-If your output contradicts an existing ADR, surface it explicitly rather than silently overriding:
+1. **标题** ——`NNNN-短横线命名.md`
+2. **状态** ——提议 / 已采纳 / 已废弃 / 已取代（被 NNNN 取代）
+3. **背景** ——促使决策的业务或技术情境
+4. **决策** ——我们决定……
+5. **后果** ——正面与负面影响
 
-> _Contradicts ADR-0002 — but worth reopening because…_
+ADR 一旦定稿即不可修改原文，只能被新 ADR 取代。
