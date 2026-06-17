@@ -45,7 +45,7 @@ MAX_LOG_LINES = 500
 
 
 def build_command(input_path, output_dir, backend, api_url=None,
-                  failure_report_path=None):
+                  failure_report_path=None, skip_existing=False):
     cmd = ["uv", "run", "mineru", "-p", input_path, "-o", output_dir]
     if backend == "CPU":
         cmd.extend(["-b", "pipeline"])
@@ -53,6 +53,8 @@ def build_command(input_path, output_dir, backend, api_url=None,
         cmd.extend(["--api-url", api_url])
     if failure_report_path:
         cmd.extend(["--failure-report-path", str(failure_report_path)])
+    if skip_existing:
+        cmd.append("--skip-existing")
     return cmd
 
 
@@ -910,6 +912,7 @@ class MinerUGui(QMainWindow if HAS_PYQT6 else object):
             cmd = build_command(
                 input_path, mineru_output, backend,
                 api_url=api_url, failure_report_path=failure_report_path,
+                skip_existing=True,
             )
 
             try:
@@ -1127,6 +1130,7 @@ class MinerUGui(QMainWindow if HAS_PYQT6 else object):
             cmd = build_command(
                 input_path, output_dir, backend,
                 api_url=api_url, failure_report_path=failure_report_path,
+                skip_existing=True,
             )
 
             worker.log(f"$ {' '.join(cmd)}")

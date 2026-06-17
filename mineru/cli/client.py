@@ -91,6 +91,28 @@ class TaskFailure:
     message: str
 
 
+def should_skip_document(
+    document: InputDocument,
+    output_dir: Path,
+    backend: str,
+    parse_method: str,
+) -> bool:
+    """Return True if the document's parse product already exists.
+
+    A parse product is the `<stem>.md` produced under the document's parse
+    directory. Office documents are checked under the `office/` parse dir.
+    """
+    parse_dir = resolve_parse_dir(
+        output_dir=output_dir,
+        pdf_name=document.stem,
+        backend=backend,
+        parse_method=parse_method,
+        is_office=document.suffix in office_suffixes,
+        allow_office_fallback=True,
+    )
+    return any(parse_dir.glob(f"{document.stem}.md"))
+
+
 def write_failure_report(
     failures: list[TaskFailure],
     report_path: Path,
@@ -873,6 +895,7 @@ async def run_orchestrated_cli(
     formula_enable: bool,
     table_enable: bool,
     failure_report_path: Optional[Path] = None,
+    skip_existing: bool = False,
     extra_cli_args: tuple[str, ...] = (),
 ) -> None:
     if start_page_id < 0:
@@ -891,6 +914,20 @@ async def run_orchestrated_cli(
         start_page_id=start_page_id,
         end_page_id=end_page_id,
     )
+
+    if skip_existing:
+        kept: list[InputDocument] = []
+        for document in documents:
+            if should_skip_document(document, output_dir, backend, method):
+                logger.info(
+                    f"跳过 {document.stem}：输出已存在"
+                )
+            else:
+                kept.append(document)
+        if not kept:
+            logger.info("所有文档均已存在，无需处理")
+            return
+        documents = kept
 
     timeout = build_http_timeout()
     local_server: LocalAPIServer | None = None
@@ -1131,6 +1168,16 @@ async def run_orchestrated_cli(
         "written."
     ),
 )
+@click.option(
+    "--skip-existing",
+    "skip_existing",
+    is_flag=True,
+    default=False,
+    help=(
+        "Skip documents whose parse product (e.g. <stem>.md) already exists "
+        "in the output directory. Skipped documents are not failures."
+    ),
+)
 def main(
     ctx: click.Context,
     input_path: Path,
@@ -1145,6 +1192,7 @@ def main(
     formula_enable: bool,
     table_enable: bool,
     failure_report_path: Optional[Path],
+    skip_existing: bool,
 ) -> None:
     asyncio.run(
         run_orchestrated_cli(
@@ -1160,6 +1208,7 @@ def main(
             formula_enable=formula_enable,
             table_enable=table_enable,
             failure_report_path=failure_report_path,
+            skip_existing=skip_existing,
             extra_cli_args=tuple(ctx.args),
         )
     )

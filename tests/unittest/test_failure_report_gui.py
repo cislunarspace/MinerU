@@ -24,6 +24,28 @@ class TestBuildCommandWithFailureReport:
         assert cmd[cmd.index("--failure-report-path") + 1] == "/tmp/r.json"
 
 
+class TestBuildCommandWithSkipExisting:
+    def test_skip_existing_omitted_by_default(self):
+        cmd = build_command("/in.pdf", "/out", "GPU", api_url="http://x")
+        assert "--skip-existing" not in cmd
+
+    def test_skip_existing_appended_when_true(self):
+        cmd = build_command(
+            "/in.pdf", "/out", "GPU", api_url="http://x", skip_existing=True,
+        )
+        assert "--skip-existing" in cmd
+
+    def test_skip_existing_composes_with_other_flags(self):
+        cmd = build_command(
+            "/in.pdf", "/out", "CPU",
+            failure_report_path="/tmp/r.json", skip_existing=True,
+        )
+        assert "--skip-existing" in cmd
+        assert "--failure-report-path" in cmd
+        assert "-b" in cmd
+
+
+
 class TestLoadFailureReport:
     def test_missing_file_returns_none(self, tmp_path):
         assert load_failure_report(tmp_path / "nope.json") is None
